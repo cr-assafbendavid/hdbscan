@@ -12,18 +12,17 @@ from scipy.sparse import issparse
 from sklearn.neighbors import KDTree, BallTree
 from joblib import Memory
 import six
+import logging
 from warnings import warn
 from sklearn.utils import check_array
 from joblib.parallel import cpu_count
 
 from scipy.sparse import csgraph
 
-from ._hdbscan_linkage import (single_linkage,
-                               mst_linkage_core,
+from ._hdbscan_linkage import (mst_linkage_core,
                                mst_linkage_core_vector,
                                label)
 from ._hdbscan_tree import (condense_tree,
-                            compute_stability,
                             get_clusters,
                             outlier_scores)
 from ._hdbscan_reachability import (mutual_reachability,
@@ -45,26 +44,29 @@ FAST_METRICS = (KDTree.valid_metrics + BallTree.valid_metrics +
 # License: BSD 3 clause
 from numpy import isclose
 
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logger.addHandler(logging.NullHandler())
+
+
 def _tree_to_labels(X, single_linkage_tree, min_cluster_size=10,
                     cluster_selection_method='eom',
                     allow_single_cluster=False,
                     match_reference_implementation=False,
-					cluster_selection_epsilon=0.0):
+                    cluster_selection_epsilon=0.0, sample_weight=None):
     """Converts a pretrained tree and cluster size into a
     set of labels and probabilities.
     """
-    condensed_tree = condense_tree(single_linkage_tree,
-                                   min_cluster_size)
-    stability_dict = compute_stability(condensed_tree)
+    logger.info("condensing single linkage tree")
+    condensed_tree = condense_tree(single_linkage_tree, sample_weight, min_cluster_size)
+    logger.info("computing clusters")
     labels, probabilities, stabilities = get_clusters(condensed_tree,
-                                                      stability_dict,
                                                       cluster_selection_method,
                                                       allow_single_cluster,
                                                       match_reference_implementation,
-													  cluster_selection_epsilon)
-
-    return (labels, probabilities, stabilities, condensed_tree,
-            single_linkage_tree)
+                                                      cluster_selection_epsilon)
+    logger.info("done clustering")
+    return labels, probabilities, stabilities, condensed_tree, single_linkage_tree
 
 
 def _hdbscan_generic(X, min_samples=5, alpha=1.0, metric='minkowski', p=2,
@@ -331,11 +333,11 @@ def check_precomputed_distance_matrix(X):
 
 def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0, cluster_selection_epsilon=0.0,
             metric='minkowski', p=2, leaf_size=40,
-            algorithm='best', memory=Memory(cachedir=None, verbose=0),
+            algorithm='best', memory=Memory(None, verbose=0),
             approx_min_span_tree=True, gen_min_span_tree=False,
             core_dist_n_jobs=4,
             cluster_selection_method='eom', allow_single_cluster=False,
-            match_reference_implementation=False, **kwargs):
+            match_reference_implementation=False, sample_weight=None, **kwargs):
     """Perform HDBSCAN clustering from a vector array or distance matrix.
 
     Parameters
@@ -480,6 +482,17 @@ def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0, cluster_selectio
     .. [3] Malzer, C., & Baum, M. (2019). A Hybrid Approach To Hierarchical 
 	   Density-based Cluster Selection. arxiv preprint 1911.02282.
     """
+    if isinstance(X, HDBSCAN):
+        return _tree_to_labels(None,
+                               X.single_linkage_tree_._linkage,
+                               min_cluster_size,
+                               cluster_selection_method,
+                               allow_single_cluster,
+                               match_reference_implementation,
+                               cluster_selection_epsilon,
+                               sample_weight) + \
+               (X._min_spanning_tree,)
+
     if min_samples is None:
         min_samples = min_cluster_size
 
@@ -532,12 +545,19 @@ def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0, cluster_selectio
 
     # Python 2 and 3 compliant string_type checking
     if isinstance(memory, six.string_types):
-        memory = Memory(cachedir=memory, verbose=0)
+        memory = Memory(memory, verbose=0)
 
     size = X.shape[0]
     min_samples = min(size - 1, min_samples)
     if min_samples == 0:
         min_samples = 1
+
+    if sample_weight is not None:
+        sample_weight = np.asarray(sample_weight, dtype=np.double)
+        if sample_weight.ndim != 1 or sample_weight.size != size:
+            raise ValueError("invalid `sample_weight`")
+        if sample_weight.min() <= 0:
+            raise ValueError("`sample_weight` must be positive")
 
     if algorithm != 'best':
         if metric != 'precomputed' and issparse(X) and metric != 'generic':
@@ -591,7 +611,6 @@ def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0, cluster_selectio
         else:
             raise TypeError('Unknown algorithm type %s specified' % algorithm)
     else:
-
         if issparse(X) or metric not in FAST_METRICS:
             # We can't do much with sparse matrices ...
             (single_linkage_tree, result_min_span_tree) = memory.cache(
@@ -635,8 +654,9 @@ def hdbscan(X, min_cluster_size=5, min_samples=None, alpha=1.0, cluster_selectio
                            cluster_selection_method,
                            allow_single_cluster,
                            match_reference_implementation,
-						   cluster_selection_epsilon) + \
-            (result_min_span_tree,)
+                           cluster_selection_epsilon,
+                           sample_weight) + \
+           (result_min_span_tree,)
 
 
 # Inherits from sklearn
@@ -844,7 +864,7 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
     def __init__(self, min_cluster_size=5, min_samples=None, cluster_selection_epsilon=0.0,
                  metric='euclidean', alpha=1.0, p=None,
                  algorithm='best', leaf_size=40,
-                 memory=Memory(cachedir=None, verbose=0),
+                 memory=Memory(None, verbose=0),
                  approx_min_span_tree=True,
                  gen_min_span_tree=False,
                  core_dist_n_jobs=4,
@@ -879,7 +899,7 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
         self._prediction_data = None
         self._relative_validity = None
 
-    def fit(self, X, y=None):
+    def fit(self, X=None, y=None, sample_weight=None):
         """Perform HDBSCAN clustering from features or distance matrix.
 
         Parameters
@@ -894,20 +914,24 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
         self : object
             Returns self
         """
-        if self.metric != 'precomputed':
-            X = check_array(X, accept_sparse='csr')
-            self._raw_data = X
-        elif issparse(X):
-            # Handle sparse precomputed distance matrices separately
-            X = check_array(X, accept_sparse='csr')
+        if X is None:
+            X = self
         else:
-            # Only non-sparse, precomputed distance matrices are allowed
-            #   to have numpy.inf values indicating missing distances
-            check_precomputed_distance_matrix(X)
+            self.sample_weight_ = sample_weight
+            if self.metric != 'precomputed':
+                X = check_array(X, accept_sparse='csr')
+                self._raw_data = X
+            elif issparse(X):
+                # Handle sparse precomputed distance matrices separately
+                X = check_array(X, accept_sparse='csr')
+            else:
+                # Only non-sparse, precomputed distance matrices are allowed
+                #   to have numpy.inf values indicating missing distances
+                check_precomputed_distance_matrix(X)
 
         kwargs = self.get_params()
         # prediction data only applies to the persistent model, so remove
-        # it from the keyword args we pass on the the function
+        # it from the keyword args we pass on the function
         kwargs.pop('prediction_data', None)
         kwargs.update(self._metric_kwargs)
 
@@ -916,7 +940,7 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
          self.cluster_persistence_,
          self._condensed_tree,
          self._single_linkage_tree,
-         self._min_spanning_tree) = hdbscan(X, **kwargs)
+         self._min_spanning_tree) = hdbscan(X, sample_weight=self.sample_weight_, **kwargs)
 
         if self.prediction_data:
             self.generate_prediction_data()
@@ -968,7 +992,6 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
                  'space inputs -- access to the source data rather'
                  'than mere distances is required!')
 
-
     def weighted_cluster_centroid(self, cluster_id):
         """Provide an approximate representative point for a given cluster.
         Note that this technique assumes a euclidean metric for speed of
@@ -998,7 +1021,6 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
         cluster_membership_strengths = self.probabilities_[mask]
 
         return np.average(cluster_data, weights=cluster_membership_strengths, axis=0)
-
 
     def weighted_cluster_medoid(self, cluster_id):
         """Provide an approximate representative point for a given cluster.
@@ -1035,7 +1057,6 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
         medoid_index = np.argmin(dist_mat.sum(axis=1))
         return cluster_data[medoid_index]
 
-
     @property
     def prediction_data_(self):
         if self._prediction_data is None:
@@ -1069,7 +1090,7 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
             return SingleLinkageTree(self._single_linkage_tree)
         else:
             raise AttributeError('No single linkage tree was generated; try running fit'
-                 ' first.')
+                                 ' first.')
 
     @property
     def minimum_spanning_tree_(self):
@@ -1084,8 +1105,8 @@ class HDBSCAN(BaseEstimator, ClusterMixin):
                 return None
         else:
             raise AttributeError('No minimum spanning tree was generated.'
-                 'This may be due to optimized algorithm variations that skip'
-                 ' explicit generation of the spanning tree.')
+                                 'This may be due to optimized algorithm variations that skip'
+                                 ' explicit generation of the spanning tree.')
 
     @property
     def exemplars_(self):

@@ -6,10 +6,11 @@
 import numpy as np
 cimport numpy as np
 
-from dist_metrics cimport DistanceMetric
-
 from libc.float cimport DBL_MAX
 from libc.math cimport exp
+
+from .dist_metrics cimport DistanceMetric
+
 
 cpdef get_tree_row_with_child(np.ndarray tree, np.intp_t child):
 
@@ -277,7 +278,7 @@ cpdef np.ndarray[np.float64_t, ndim=2] all_points_per_cluster_scores(
     result = (<np.float64_t [:num_points, :clusters.shape[0]:1]>
                  (<np.float64_t *> result_arr.data))
 
-    point_tree = tree[tree['child_size'] == 1]
+    point_tree = tree[tree['child'] < num_points]
 
     for i in range(point_tree.shape[0]):
         point_row = point_tree[i]
@@ -341,7 +342,7 @@ cpdef all_points_prob_in_some_cluster(
 
     result = np.empty(num_points, dtype=np.float64)
 
-    point_tree = tree[tree['child_size'] == 1]
+    point_tree = tree[tree['child'] < num_points]
 
     for i in range(point_tree.shape[0]):
         point_row = point_tree[i]

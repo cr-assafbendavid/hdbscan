@@ -32,6 +32,7 @@ def _bfs_from_cluster_tree(tree, bfs_root):
 
     return result
 
+
 def _recurse_leaf_dfs(cluster_tree, current_node):
     children = cluster_tree[cluster_tree['parent'] == current_node]['child']
     if len(children) == 0:
@@ -39,14 +40,15 @@ def _recurse_leaf_dfs(cluster_tree, current_node):
     else:
         return sum([recurse_leaf_dfs(cluster_tree, child) for child in children], [])
 
+
 def _get_leaves(condensed_tree):
-    cluster_tree = condensed_tree[condensed_tree['child_size'] > 1]
+    root = condensed_tree['parent'].min()
+    cluster_tree = condensed_tree[condensed_tree['child'] >= root]
     if cluster_tree.shape[0] == 0:
         # Return the only cluster, the root
-        return [condensed_tree['parent'].min()]
-
-    root = cluster_tree['parent'].min()
+        return [root]
     return _recurse_leaf_dfs(cluster_tree, root)
+
 
 class CondensedTree(object):
     """The condensed tree structure, which provides a simplified or smoothed version
@@ -126,8 +128,7 @@ class CondensedTree(object):
 
         for cluster in range(last_leaf, root - 1, -1):
             split = self._raw_tree[['child', 'lambda_val']]
-            split = split[(self._raw_tree['parent'] == cluster) &
-                          (self._raw_tree['child_size'] > 1)]
+            split = split[(self._raw_tree['parent'] == cluster) & (self._raw_tree['child'] >= root)]
             if len(split['child']) > 1:
                 left_child, right_child = split['child']
                 cluster_x_coords[cluster] = np.mean([cluster_x_coords[left_child],
@@ -145,7 +146,7 @@ class CondensedTree(object):
 
         cluster_bounds = {}
 
-        scaling = np.sum(self._raw_tree[self._raw_tree['parent'] == root]['child_size'])
+        scaling = np.sum(self._raw_tree[self._raw_tree['parent'] == root]['child_weight'])
 
         if log_size:
             scaling = np.log(scaling)
@@ -155,13 +156,11 @@ class CondensedTree(object):
             cluster_bounds[c] = [0, 0, 0, 0]
 
             c_children = self._raw_tree[self._raw_tree['parent'] == c]
-            current_size = np.sum(c_children['child_size'])
+            current_size = np.sum(c_children['child_weight'])
             current_lambda = cluster_y_coords[c]
             cluster_max_size = current_size
             cluster_max_lambda = c_children['lambda_val'].max()
-            cluster_min_size = np.sum(
-                c_children[c_children['lambda_val'] ==
-                           cluster_max_lambda]['child_size'])
+            cluster_min_size = np.sum(c_children[c_children['lambda_val'] == cluster_max_lambda]['child_weight'])
 
             if log_size:
                 current_size = np.log(current_size)
@@ -191,24 +190,24 @@ class CondensedTree(object):
                     last_step_size = current_size
                     last_step_lambda = current_lambda
                 if log_size:
-                    exp_size = np.exp(current_size) - row['child_size']
+                    exp_size = np.exp(current_size) - row['child_weight']
                     # Ensure we don't try to take log of zero
                     if exp_size > 0.01:
-                        current_size = np.log(np.exp(current_size) - row['child_size'])
+                        current_size = np.log(np.exp(current_size) - row['child_weight'])
                     else:
                         current_size = 0.0
                 else:
-                    current_size -= row['child_size']
+                    current_size -= row['child_weight']
                 current_lambda = row['lambda_val']
 
         # Finally we need the horizontal lines that occur at cluster splits.
         line_xs = []
         line_ys = []
 
-        for row in self._raw_tree[self._raw_tree['child_size'] > 1]:
+        for row in self._raw_tree[self._raw_tree['child'] >= root]:
             parent = row['parent']
             child = row['child']
-            child_size = row['child_size']
+            child_size = row['child_weight']
             if log_size:
                 child_size = np.log(child_size)
             sign = np.sign(cluster_x_coords[child] - cluster_x_coords[parent])
@@ -238,7 +237,7 @@ class CondensedTree(object):
                 node_list = sorted(stability.keys(), reverse=True)
             else:
                 node_list = sorted(stability.keys(), reverse=True)[:-1]
-            cluster_tree = self._raw_tree[self._raw_tree['child_size'] > 1]
+            cluster_tree = self._raw_tree[self._raw_tree['child'] >= self._raw_tree['parent'].min()]
             is_cluster = {cluster: True for cluster in node_list}
 
             for node in node_list:
@@ -459,7 +458,7 @@ class CondensedTree(object):
 
         Each row of the dataframe corresponds to an edge in the tree.
         The columns of the dataframe are `parent`, `child`, `lambda_val`
-        and `child_size`.
+        and `child_weight`.
 
         The `parent` and `child` are the ids of the
         parent and child nodes in the tree. Node ids less than the number
@@ -469,7 +468,7 @@ class CondensedTree(object):
         The `lambda_val` value is the value (1/distance) at which the `child`
         node leaves the cluster.
 
-        The `child_size` is the number of points in the `child` node.
+        The `child_weight` is the total weight of the points in the `child` node.
         """
         try:
             from pandas import DataFrame, Series
@@ -500,36 +499,33 @@ class CondensedTree(object):
         for row in self._raw_tree:
             result.add_edge(row['parent'], row['child'], weight=row['lambda_val'])
 
-        set_node_attributes(result, dict(self._raw_tree[['child', 'child_size']]), 'size')
+        set_node_attributes(result, dict(self._raw_tree[['child', 'child_weight']]), 'size')
 
         return result
 
 
 def _get_dendrogram_ordering(parent, linkage, root):
-
     if parent < root:
         return []
-
     return _get_dendrogram_ordering(int(linkage[parent-root][0]), linkage, root) + \
             _get_dendrogram_ordering(int(linkage[parent-root][1]), linkage, root) + [parent]
 
-def _calculate_linewidths(ordering, linkage, root):
 
+def _calculate_linewidths(ordering, linkage, root, weights=None):
     linewidths = []
-
     for x in ordering:
-        if linkage[x - root][0] >= root:
-            left_width = linkage[int(linkage[x - root][0]) - root][3]
-        else:
-            left_width = 1
-
-        if linkage[x - root][1] >= root:
-            right_width = linkage[int(linkage[x - root][1]) - root][3]
-        else:
-            right_width = 1
-
-        linewidths.append((left_width, right_width))
-
+        widths = []
+        row = x - root
+        for i in range(2):
+            child = int(linkage[row, i])
+            if child >= root:
+                w = linkage[child - root, 3]
+            elif weights is not None:
+                w = weights[child]
+            else:
+                w = 1
+            widths.append(w)
+        linewidths.append(widths)
     return linewidths
 
 
@@ -544,8 +540,9 @@ class SingleLinkageTree(object):
         scipy.cluster.hierarchy, hdbscan, of fastcluster.
 
     """
-    def __init__(self, linkage):
+    def __init__(self, linkage, sample_weights=None):
         self._linkage = linkage
+        self._weights = sample_weights
 
     def plot(self, axis=None, truncate_mode=None, p=0, vary_line_width=True,
              cmap='viridis', colorbar=True):
@@ -608,7 +605,7 @@ class SingleLinkageTree(object):
 
         if vary_line_width:
             dendrogram_ordering = _get_dendrogram_ordering(2 * len(self._linkage), self._linkage, len(self._linkage) + 1)
-            linewidths = _calculate_linewidths(dendrogram_ordering, self._linkage, len(self._linkage) + 1)
+            linewidths = _calculate_linewidths(dendrogram_ordering, self._linkage, len(self._linkage) + 1, self._weights)
         else:
             linewidths = [(1.0, 1.0)] * len(Y)
 
@@ -665,7 +662,6 @@ class SingleLinkageTree(object):
         """
         return self._linkage.copy()
 
-
     def to_pandas(self):
         """Return a pandas dataframe representation of the single linkage tree.
 
@@ -684,24 +680,18 @@ class SingleLinkageTree(object):
         The `size` is the number of points in the `parent` node.
         """
         try:
-            from pandas import DataFrame, Series
+            from pandas import DataFrame, RangeIndex
         except ImportError:
             raise ImportError('You must have pandas installed to export pandas DataFrames')
 
+        itype = np.uint32
         max_node = 2 * self._linkage.shape[0]
-        num_points = max_node - (self._linkage.shape[0] - 1)
-
-        parent_array = np.arange(num_points, max_node + 1)
-
-        result = DataFrame({
-            'parent': parent_array,
-            'left_child': self._linkage.T[0],
-            'right_child': self._linkage.T[1],
-            'distance': self._linkage.T[2],
-            'size': self._linkage.T[3]
-        })[['parent', 'left_child', 'right_child', 'distance', 'size']]
-
-        return result
+        return DataFrame({
+            'left_child': self._linkage[:, 0].astype(itype),
+            'right_child': self._linkage[:, 1].astype(itype),
+            'distance': self._linkage[:, 2],
+            'weight': self._linkage[:, 3]
+        }, index=RangeIndex(max_node - (self._linkage.shape[0] - 1), max_node + 1, name='parent'))
 
     def to_networkx(self):
         """Return a NetworkX DiGraph object representing the single linkage tree.

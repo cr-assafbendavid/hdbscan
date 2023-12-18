@@ -12,7 +12,11 @@ import numpy as np
 cimport numpy as np
 np.import_array()  # required in order to use C-API
 
-from libc.math cimport fabs, sqrt, exp, cos, pow, log, acos, M_PI
+from libc.stdlib cimport ldiv_t, ldiv
+from libc.math cimport fabs, sqrt, pow, cos, sin, asin, acos, M_PI
+
+from cython.parallel import prange
+from scipy.sparse import csr_matrix
 
 DTYPE = np.double
 ITYPE = np.intp
@@ -51,7 +55,6 @@ cdef inline np.ndarray _buffer_to_ndarray(DTYPE_t* x, np.npy_intp n):
 
 
 # some handy constants
-from libc.math cimport fabs, sqrt, exp, pow, cos, sin, asin
 cdef DTYPE_t INF = np.inf
 
 
@@ -321,27 +324,39 @@ cdef class DistanceMetric:
         """
         return self.dist(x1, x2, size)
 
-    cdef int pdist(self, DTYPE_t[:, ::1] X, DTYPE_t[:, ::1] D) except -1:
+    cdef int pdist(self, DTYPE_t[:, ::1] X, DTYPE_t[:, ::1] D) nogil except -1:
         """compute the pairwise distances between points in X"""
-        cdef ITYPE_t i1, i2
-        for i1 in range(X.shape[0]):
-            for i2 in range(i1, X.shape[0]):
-                D[i1, i2] = self.dist(&X[i1, 0], &X[i2, 0], X.shape[1])
-                D[i2, i1] = D[i1, i2]
+        cdef ITYPE_t i, j, k
+        for k in prange(X.shape[0] * (X.shape[0] - 1) / 2, nogil=True):
+            i, j = flat_index_to_dense_pair(k, X.shape[0])
+            D[i, j] = self.dist(&X[i, 0], &X[j, 0], X.shape[1])
+            D[j, i] = D[i, j]
         return 0
 
-    cdef int cdist(self, DTYPE_t[:, ::1] X, DTYPE_t[:, ::1] Y,
-                   DTYPE_t[:, ::1] D) except -1:
+    cdef int cdist(self, DTYPE_t[:, ::1] X, DTYPE_t[:, ::1] Y, DTYPE_t[:, ::1] D) nogil except -1:
         """compute the cross-pairwise distances between arrays X and Y"""
-        cdef ITYPE_t i1, i2
-        if X.shape[1] != Y.shape[1]:
-            raise ValueError('X and Y must have the same second dimension')
-        for i1 in range(X.shape[0]):
-            for i2 in range(Y.shape[0]):
-                D[i1, i2] = self.dist(&X[i1, 0], &Y[i2, 0], X.shape[1])
+        cdef ITYPE_t k
+        cdef ldiv_t dm
+        for k in prange(D.shape[0] * D.shape[1], nogil=True):
+            dm = ldiv(k, D.shape[1])
+            D[dm.quot, dm.rem] = self.dist(&X[dm.quot, 0], &Y[dm.rem, 0], X.shape[1])
         return 0
 
-    cdef DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef int pdist1d(self, DTYPE_t[:, ::1] X, DTYPE_t[::1] D) nogil except -1:
+        cdef ITYPE_t i, j, k
+        for k in prange(D.shape[0], nogil=True):
+            i, j = flat_index_to_dense_pair(k, X.shape[0])
+            D[k] = self.dist(&X[i, 0], &X[j, 0], X.shape[1])
+        return 0
+
+    cdef int partial_pdist(self, DTYPE_t[:, ::1] X, DTYPE_t[:, ::1] Y, ITYPE_t[:, ::1] ij,
+                           DTYPE_t[::1] D) nogil except -1:
+        cdef ITYPE_t k
+        for k in prange(D.shape[0], nogil=True):
+            D[k] = self.dist(&X[ij[k, 0], 0], &Y[ij[k, 1], 0], X.shape[1])
+        return 0
+
+    cdef DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         """Convert the reduced distance to the distance"""
         return rdist
 
@@ -369,6 +384,19 @@ cdef class DistanceMetric:
         """
         return dist
 
+    @staticmethod
+    def _validate_XY(X, Y):
+        X = np.asarray(X, dtype=DTYPE, order='C')
+        if X.ndim != 2:
+            raise ValueError("`X` should be 2D")
+        if Y is not None:
+            Y = np.asarray(Y, dtype=DTYPE, order='C')
+            if Y.ndim != 2:
+                raise ValueError("`Y` should be 2D")
+            if X.shape[1] != Y.shape[1]:
+                raise ValueError("`X` and `Y` must have the same number of columns")
+        return X, Y
+
     def pairwise(self, X, Y=None):
         """Compute the pairwise distances between X and Y
 
@@ -383,30 +411,94 @@ cdef class DistanceMetric:
         Y : array_like (optional)
             Array of shape (Ny, D), representing Ny points in D dimensions.
             If not specified, then Y=X.
+
         Returns
         -------
         dist : ndarray
             The shape (Nx, Ny) array of pairwise distances between points in
             X and Y.
         """
-        cdef np.ndarray[DTYPE_t, ndim=2, mode='c'] Xarr
-        cdef np.ndarray[DTYPE_t, ndim=2, mode='c'] Yarr
-        cdef np.ndarray[DTYPE_t, ndim=2, mode='c'] Darr
-
-        Xarr = np.asarray(X, dtype=DTYPE, order='C')
+        X, Y = self._validate_XY(X, Y)
         if Y is None:
-            Darr = np.zeros((Xarr.shape[0], Xarr.shape[0]),
-                            dtype=DTYPE, order='C')
-            self.pdist(get_memview_DTYPE_2D(Xarr),
-                       get_memview_DTYPE_2D(Darr))
+            D = np.empty((X.shape[0], X.shape[0]), dtype=DTYPE, order='C')
+            np.fill_diagonal(D, 0)
+            self.pdist(X, D)
         else:
-            Yarr = np.asarray(Y, dtype=DTYPE, order='C')
-            Darr = np.zeros((Xarr.shape[0], Yarr.shape[0]),
-                            dtype=DTYPE, order='C')
-            self.cdist(get_memview_DTYPE_2D(Xarr),
-                       get_memview_DTYPE_2D(Yarr),
-                       get_memview_DTYPE_2D(Darr))
-        return Darr
+            D = np.empty((X.shape[0], Y.shape[0]), dtype=DTYPE, order='C')
+            self.cdist(X, Y, D)
+        return D
+
+    def sparse_pairwise(self, X, Y=None, indices=None):
+        """Compute the pairwise distances between some entries of X and Y, returning a sparse matrix.
+
+        Parameters
+        ----------
+        X : array_like
+            Array of shape (Nx, D), representing Nx points in D dimensions.
+        Y : array_like (optional)
+            Array of shape (Ny, D), representing Ny points in D dimensions.
+            If not specified, then Y=X.
+        indices : array_like (optional)
+            Array of indices with two columns, containing pairs of indices into X and Y to calculate.
+            If not specified and Y is None, calculates only the upper triangle.
+            If not specified and Y is given, calculates everything.
+
+        Returns
+        -------
+        dist : csr_matrix
+            The shape (Nx, Ny) sparse matrix of pairwise distances between requested pairs in
+            X and Y. If distance is zero, the value WILL remain in the sparse matrix.
+        """
+        X, Y = self._validate_XY(X, Y)
+        if Y is None:
+            Y = X
+        elif indices is None:
+            return csr_matrix(self.pairwise(X, Y))
+        shape = X.shape[0], Y.shape[0]
+        if indices is None:
+            indices = np.column_stack(np.triu_indices(X.shape[0], k=1)).astype(ITYPE, order='C', copy=False)
+        else:
+            indices = np.asarray(indices, dtype=ITYPE, order='C')
+            if indices.ndim != 2 or indices.shape[1] != 2 or np.any(indices.max(axis=0) >= shape):
+                raise ValueError("invalid `indices`")
+        D = np.empty(indices.shape[0], dtype=DTYPE, order='C')
+        self.partial_pdist(X, Y, indices, D)
+        return csr_matrix((D, tuple(indices.T)), shape=shape)
+
+    def medoid(self, X):
+        cdef ITYPE_t i, j, k, N, medoid, other
+        cdef DTYPE_t mean, d, sum_sq = 0, max_dist = 0
+
+        X = np.asarray(X, dtype=DTYPE, order='C')
+        N = X.shape[0]
+        S = np.zeros(N, dtype=DTYPE, order='C')
+        D = np.empty(N * (N - 1) / 2, dtype=DTYPE, order='C')
+        self.pdist1d(X, D)
+
+        cdef DTYPE_t[::1] Sv = S
+        cdef DTYPE_t[::1] Dv = D
+
+        for k in range(Dv.shape[0]):
+            i, j = flat_index_to_dense_pair(k, N)
+            Sv[i] += Dv[k]
+            Sv[j] += Dv[k]
+
+        medoid = S.argmin()
+        mean = Sv[medoid] / N
+
+        for other in range(N):
+            if other < medoid:
+                k = dense_pair_to_flat_index(other, medoid, N)
+            elif other > medoid:
+                k = dense_pair_to_flat_index(medoid, other, N)
+            else:
+                continue
+            d = Dv[k]
+            sum_sq += d * d
+            if d > max_dist:
+                max_dist = d
+
+        return medoid, mean, sqrt(sum_sq / N - mean * mean), max_dist
 
 
 # ------------------------------------------------------------
@@ -429,7 +521,7 @@ cdef class EuclideanDistance(DistanceMetric):
                               ITYPE_t size) nogil except -1:
         return euclidean_rdist(x1, x2, size)
 
-    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         return sqrt(rdist)
 
     cdef inline DTYPE_t _dist_to_rdist(self, DTYPE_t dist) nogil except -1:
@@ -473,7 +565,7 @@ cdef class SEuclideanDistance(DistanceMetric):
                              ITYPE_t size) nogil except -1:
         return sqrt(self.rdist(x1, x2, size))
 
-    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         return sqrt(rdist)
 
     cdef inline DTYPE_t _dist_to_rdist(self, DTYPE_t dist) nogil except -1:
@@ -562,7 +654,7 @@ cdef class MinkowskiDistance(DistanceMetric):
                              ITYPE_t size) nogil except -1:
         return pow(self.rdist(x1, x2, size), 1. / self.p)
 
-    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         return pow(rdist, 1. / self.p)
 
     cdef inline DTYPE_t _dist_to_rdist(self, DTYPE_t dist) nogil except -1:
@@ -621,7 +713,7 @@ cdef class WMinkowskiDistance(DistanceMetric):
                              ITYPE_t size) nogil except -1:
         return pow(self.rdist(x1, x2, size), 1. / self.p)
 
-    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         return pow(rdist, 1. / self.p)
 
     cdef inline DTYPE_t _dist_to_rdist(self, DTYPE_t dist) nogil except -1:
@@ -654,6 +746,9 @@ cdef class MahalanobisDistance(DistanceMetric):
     """
     def __init__(self, V=None, VI=None):
         if VI is None:
+            if V is None:
+                raise ValueError("Must provide either V or VI "
+                                 "for Mahalanobis distance")
             VI = np.linalg.inv(V)
         if VI.ndim != 2 or VI.shape[0] != VI.shape[1]:
             raise ValueError("V/VI must be square")
@@ -691,7 +786,7 @@ cdef class MahalanobisDistance(DistanceMetric):
                              ITYPE_t size) nogil except -1:
         return sqrt(self.rdist(x1, x2, size))
 
-    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         return sqrt(rdist)
 
     cdef inline DTYPE_t _dist_to_rdist(self, DTYPE_t dist) nogil except -1:
@@ -1009,7 +1104,7 @@ cdef class HaversineDistance(DistanceMetric):
         return 2 * asin(sqrt(sin_0 * sin_0 +
                              cos(x1[0]) * cos(x2[0]) * sin_1 * sin_1))
 
-    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) except -1:
+    cdef inline DTYPE_t _rdist_to_dist(self, DTYPE_t rdist) nogil except -1:
         return 2 * asin(sqrt(rdist))
 
     cdef inline DTYPE_t _dist_to_rdist(self, DTYPE_t dist) nogil except -1:
@@ -1145,3 +1240,15 @@ cdef class PyFuncDistance(DistanceMetric):
 
 cdef inline double fmax(double a, double b) nogil:
     return max(a, b)
+
+
+######################################################################
+cdef inline (ITYPE_t, ITYPE_t) flat_index_to_dense_pair(ITYPE_t flatind, ITYPE_t size) nogil:
+    cdef ITYPE_t M = 2 * size - 1
+    cdef ITYPE_t i = <ITYPE_t>((M - sqrt(M * M - 8 * flatind)) / 2)
+    cdef ITYPE_t j = i * (i + 3) / 2 + flatind - i * size + 1
+    return i, j
+
+
+cdef inline ITYPE_t dense_pair_to_flat_index(ITYPE_t row, ITYPE_t col, ITYPE_t size) nogil:
+    return row * size - row * (row + 3) / 2 + col - 1

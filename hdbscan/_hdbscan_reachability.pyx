@@ -8,7 +8,7 @@
 import numpy as np
 cimport numpy as np
 
-from scipy.spatial.distance import pdist, squareform
+from scipy.spatial.distance import pdist
 from scipy.sparse import lil_matrix as sparse_matrix
 from sklearn.neighbors import KDTree, BallTree
 import gc

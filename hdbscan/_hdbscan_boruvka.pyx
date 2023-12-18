@@ -63,12 +63,12 @@ cimport numpy as np
 from libc.float cimport DBL_MAX
 from libc.math cimport fabs, pow
 
+from joblib import Parallel, delayed
 from sklearn.neighbors import KDTree, BallTree
 
-import dist_metrics as dist_metrics
-cimport dist_metrics as dist_metrics
+from .dist_metrics import DistanceMetric
+from .dist_metrics cimport DistanceMetric
 
-from joblib import Parallel, delayed
 
 cdef np.double_t INF = np.inf
 
@@ -98,7 +98,7 @@ cdef inline np.double_t balltree_min_dist_dual(
 # Define a function giving the minimum distance between two
 # nodes of a kd-tree
 cdef inline np.double_t kdtree_min_dist_dual(
-    dist_metrics.DistanceMetric metric,
+    DistanceMetric metric,
     np.intp_t node1,
     np.intp_t node2,
     np.double_t[:, :, ::1] node_bounds,
@@ -135,7 +135,7 @@ cdef inline np.double_t kdtree_min_dist_dual(
 # implementation. This allows us to release the GIL over
 # larger sections of code
 cdef inline np.double_t kdtree_min_rdist_dual(
-    dist_metrics.DistanceMetric metric,
+    DistanceMetric metric,
     np.intp_t node1,
     np.intp_t node2,
     np.double_t[:, :, ::1] node_bounds,
@@ -270,7 +270,7 @@ cdef class KDTreeBoruvkaAlgorithm (object):
 
     cdef object tree
     cdef object core_dist_tree
-    cdef dist_metrics.DistanceMetric dist
+    cdef DistanceMetric dist
     cdef np.ndarray _data
     cdef np.double_t[:, ::1] _raw_data
     cdef np.double_t[:, :, ::1] node_bounds
@@ -332,7 +332,7 @@ cdef class KDTreeBoruvkaAlgorithm (object):
         self.num_features = self.tree.data.shape[1]
         self.num_nodes = self.tree.node_data.shape[0]
 
-        self.dist = dist_metrics.DistanceMetric.get_metric(metric, **kwargs)
+        self.dist = DistanceMetric.get_metric(metric, **kwargs)
 
         self.components = np.arange(self.num_points)
         self.bounds_arr = np.empty(self.num_nodes, np.double)
@@ -879,7 +879,7 @@ cdef class BallTreeBoruvkaAlgorithm (object):
 
     cdef object tree
     cdef object core_dist_tree
-    cdef dist_metrics.DistanceMetric dist
+    cdef DistanceMetric dist
     cdef np.ndarray _data
     cdef np.double_t[:, ::1] _raw_data
     cdef np.double_t alpha
@@ -940,7 +940,7 @@ cdef class BallTreeBoruvkaAlgorithm (object):
         self.num_features = self.tree.data.shape[1]
         self.num_nodes = self.tree.node_data.shape[0]
 
-        self.dist = dist_metrics.DistanceMetric.get_metric(metric, **kwargs)
+        self.dist = DistanceMetric.get_metric(metric, **kwargs)
 
         self.components = np.arange(self.num_points)
         self.bounds_arr = np.empty(self.num_nodes, np.double)

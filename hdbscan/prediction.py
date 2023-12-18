@@ -110,13 +110,12 @@ class PredictionData(object):
         self.cluster_map = {c: n for n, c in enumerate(sorted(list(selected_clusters)))}
         self.reverse_cluster_map = {n: c for c, n in self.cluster_map.items()}
 
-        self.cluster_tree = raw_condensed_tree[raw_condensed_tree['child_size'] > 1]
+        self.cluster_tree = raw_condensed_tree[raw_condensed_tree['child'] >= raw_condensed_tree['parent'].min()]
         self.max_lambdas = {}
         self.leaf_max_lambdas = {}
         self.exemplars = []
 
-        all_clusters = set(np.hstack([self.cluster_tree['parent'],
-                                      self.cluster_tree['child']]))
+        all_clusters = set(np.hstack([self.cluster_tree['parent'], self.cluster_tree['child']]))
 
         for cluster in all_clusters:
             self.leaf_max_lambdas[cluster] = raw_condensed_tree['lambda_val'][

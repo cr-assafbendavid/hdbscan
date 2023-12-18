@@ -8,8 +8,9 @@ import numpy as np
 cimport numpy as np
 
 from libc.float cimport DBL_MAX
+from cython.operator cimport postincrement
 
-from dist_metrics cimport DistanceMetric
+from .dist_metrics cimport DistanceMetric
 
 
 cpdef np.ndarray[np.double_t, ndim=2] mst_linkage_core(
@@ -150,79 +151,69 @@ cpdef np.ndarray[np.double_t, ndim=2] mst_linkage_core_vector(
                     new_distance = right_value
                     new_node = j
 
-        result[i - 1, 0] = <double> current_node
-        result[i - 1, 1] = <double> new_node
+        result[i - 1, 0] = <double>current_node
+        result[i - 1, 1] = <double>new_node
         result[i - 1, 2] = new_distance
         current_node = new_node
 
     return result_arr
 
 
-cdef class UnionFind (object):
+cdef class UnionFind:
+    cdef np.intp_t n_elements
+    cdef np.intp_t[::1] parent
+    cdef np.double_t[::1] size
 
-    cdef np.ndarray parent_arr
-    cdef np.ndarray size_arr
-    cdef np.intp_t next_label
-    cdef np.intp_t *parent
-    cdef np.intp_t *size
+    def __init__(self, np.intp_t n_elements):
+        self.n_elements = n_elements
+        self.parent = np.full(2 * n_elements - 1, -1, dtype=np.intp, order='C')
+        self.size = np.empty(self.parent.shape[0], dtype=np.double)
+        self.size[:n_elements] = 1
 
-    def __init__(self, N):
-        self.parent_arr = -1 * np.ones(2 * N - 1, dtype=np.intp, order='C')
-        self.next_label = N
-        self.size_arr = np.hstack((np.ones(N, dtype=np.intp),
-                                   np.zeros(N-1, dtype=np.intp)))
-        self.parent = (<np.intp_t *> self.parent_arr.data)
-        self.size = (<np.intp_t *> self.size_arr.data)
+    cdef np.double_t _unify(self, np.intp_t node1, np.intp_t node2):
+        cdef np.double_t union_size = self.size[node1] + self.size[node2]
+        self.size[postincrement(self.n_elements)] = union_size
+        return union_size
 
-    cdef void union(self, np.intp_t m, np.intp_t n):
-        self.size[self.next_label] = self.size[m] + self.size[n]
-        self.parent[m] = self.next_label
-        self.parent[n] = self.next_label
-        self.size[self.next_label] = self.size[m] + self.size[n]
-        self.next_label += 1
+    cdef (np.intp_t, np.intp_t, np.double_t) union(self, np.intp_t node1, np.intp_t node2):
+        cdef np.intp_t root1 = self._find(node1)
+        cdef np.intp_t root2 = self._find(node2)
+        return root1, root2, self._unify(root1, root2)
 
-        return
-
-    cdef np.intp_t fast_find(self, np.intp_t n):
-        cdef np.intp_t p
-        p = n
-        while self.parent_arr[n] != -1:
-            n = self.parent_arr[n]
-        # label up to the root
-        while self.parent_arr[p] != n:
-            p, self.parent_arr[p] = self.parent_arr[p], n
-        return n
+    cdef np.intp_t _find(self, np.intp_t node) nogil:
+        cdef np.intp_t parent = self.parent[node]
+        while parent != -1:
+            self.parent[node] = self.n_elements
+            node = parent
+            parent = self.parent[node]
+        self.parent[node] = self.n_elements
+        return node
 
 
-cpdef np.ndarray[np.double_t, ndim=2] label(np.ndarray[np.double_t, ndim=2] L):
+cdef class WeightedUnionFind(UnionFind):
+    def __init__(self, np.double_t[:] weights):
+        super().__init__(weights.shape[0])
+        self.size[:self.n_elements] = weights
 
-    cdef np.ndarray[np.double_t, ndim=2] result_arr
-    cdef np.double_t[:, ::1] result
 
-    cdef np.intp_t N, a, aa, b, bb, index
-    cdef np.double_t delta
+def label(const np.double_t[:, :] mst, np.double_t[:] sample_weight=None):
+    cdef Py_ssize_t i
+    cdef np.intp_t left_root, right_root
+    cdef np.double_t size
+    result_arr = np.empty((mst.shape[0], mst.shape[1] + 1), dtype=np.double, order='C')
+    cdef np.double_t[:, ::1] result = result_arr
+    cdef UnionFind uf
 
-    result_arr = np.zeros((L.shape[0], L.shape[1] + 1))
-    result = (<np.double_t[:L.shape[0], :4:1]> (
-        <np.double_t *> result_arr.data))
-    N = L.shape[0] + 1
-    U = UnionFind(N)
-
-    for index in range(L.shape[0]):
-
-        a = <np.intp_t> L[index, 0]
-        b = <np.intp_t> L[index, 1]
-        delta = L[index, 2]
-
-        aa, bb = U.fast_find(a), U.fast_find(b)
-
-        result[index][0] = aa
-        result[index][1] = bb
-        result[index][2] = delta
-        result[index][3] = U.size[aa] + U.size[bb]
-
-        U.union(aa, bb)
-
+    if sample_weight is None:
+        uf = UnionFind(mst.shape[0] + 1)
+    else:
+        uf = WeightedUnionFind(sample_weight)
+    for i in range(mst.shape[0]):
+        left_root, right_root, size = uf.union(<np.intp_t>mst[i, 0], <np.intp_t>mst[i, 1])
+        result[i, 0] = left_root
+        result[i, 1] = right_root
+        result[i, 3] = size
+    result[:, 2] = mst[:, 2]
     return result_arr
 
 

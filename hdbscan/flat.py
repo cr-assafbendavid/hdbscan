@@ -663,7 +663,7 @@ def select_epsilon_eom(condensed_tree, n_clusters):
 
     tree = condensed_tree._raw_tree
     # To select epsilon, consider all values where clusters are split
-    cluster_lambdas = tree['lambda_val'][tree['child_size'] > 1]
+    cluster_lambdas = tree['lambda_val'][tree['child'] < tree['parent'].min()]
     candidate_epsilons = 1./np.unique(cluster_lambdas) - 1.e-12
     # Subtract the extra e-12 to avoid numerical errors in comparison
     # Then, we avoid splitting for all epsilon below this.
@@ -685,17 +685,15 @@ def select_epsilon_leaf(condensed_tree, n_clusters):
         after truncating at the above epsilon,
         has exactly 'n_clusters' clusters
     """
+    tree = condensed_tree._raw_tree
     # Use an epsilon value that produces the right number of clusters.
     # The condensed tree of HDBSCAN has this information.
     # Extract the lambda levels (=1/distance) from the condensed tree
-    lambdas = condensed_tree._raw_tree['lambda_val']
+    lambdas = tree['lambda_val']
     # We don't want values that produce a large cluster and
     #   just one or two individual points.
-    child_sizes = condensed_tree._raw_tree['child_size']
-    child_sizes = child_sizes.astype(int)
     # Keep only those lambda values corresponding to cluster separation;
-    #   i.e., with child_sizes > 1
-    lambdas = lambdas[child_sizes > 1]
+    lambdas = lambdas[tree['child'] >= tree['parent'].min()]
     # Get the unique values, because when two clusters fall out of one,
     #   the entry with lambda is repeated.
     lambdas = np.unique(lambdas.astype(float))
@@ -822,7 +820,7 @@ def _new_select_clusters(condensed_tree,
         node_list = sorted(stability.keys(), reverse=True)[:-1]
         # (exclude root)
 
-    cluster_tree = tree[tree['child_size'] > 1]
+    cluster_tree = tree[tree['child'] >= tree['parent'].min()]
     is_cluster = {cluster: True for cluster in node_list}
 
     if cluster_selection_method == 'eom':
